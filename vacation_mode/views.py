@@ -1,7 +1,6 @@
 from functools import wraps
 
 from bdh_sdk import is_admin
-from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -20,8 +19,11 @@ from . import bdl_client, config
 
 
 def admin_required(view):
-    """Signed-out users go to the login page; signed-in non-admins get 403."""
-    @login_required
+    """Non-admins, including signed-out visitors, get 403.
+
+    The app container has no hub login page to redirect to, and Django's
+    login redirect imports contrib.auth models the runtime doesn't install.
+    """
     @wraps(view)
     def wrapper(request, *args, **kwargs):
         if not is_admin(request):
