@@ -6,6 +6,8 @@ import time
 import unittest
 import requests as requests_lib
 
+from bdh_sdk.ha import HAError
+
 try:
     from selenium import webdriver
     from selenium.webdriver.common.by import By
@@ -62,34 +64,28 @@ from .steps import (
 class GetAwayModeStateTests(TestCase):
     """Tests for querying the away mode state from Home Assistant."""
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_returns_true_when_on(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "on", "entity_id": "input_boolean.home_away_mode_enabled"},
-        )
+        mock_get.return_value = {"state": "on", "entity_id": "input_boolean.home_away_mode_enabled"}
         self.assertTrue(get_away_mode_state())
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_returns_false_when_off(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "off", "entity_id": "input_boolean.home_away_mode_enabled"},
-        )
+        mock_get.return_value = {"state": "off", "entity_id": "input_boolean.home_away_mode_enabled"}
         self.assertFalse(get_away_mode_state())
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_returns_false_on_error(self, mock_get):
-        mock_get.side_effect = requests_lib.RequestException("Connection refused")
+        mock_get.side_effect = HAError("Connection refused")
         self.assertFalse(get_away_mode_state())
 
 
 class CallHaServiceTests(TestCase):
     """Tests for calling Home Assistant services."""
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_successful_call(self, mock_post):
-        mock_post.return_value = MagicMock(status_code=200)
+        mock_post.return_value = (True, None)
         success, error = call_ha_service(
             action="input_boolean/turn_on",
             data={"entity_id": "input_boolean.home_away_mode_enabled"},
@@ -97,9 +93,9 @@ class CallHaServiceTests(TestCase):
         self.assertTrue(success)
         self.assertIsNone(error)
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_failed_call_returns_error(self, mock_post):
-        mock_post.return_value = MagicMock(status_code=500, text="Internal Server Error")
+        mock_post.return_value = (False, "HA returned 500: Internal Server Error")
         success, error = call_ha_service(
             action="climate/set_temperature",
             data={"temperature": 13.5},
@@ -108,9 +104,9 @@ class CallHaServiceTests(TestCase):
         self.assertFalse(success)
         self.assertIn("500", error)
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_network_exception(self, mock_post):
-        mock_post.side_effect = requests_lib.ConnectionError("Connection timeout")
+        mock_post.side_effect = HAError("Connection timeout")
         success, error = call_ha_service(
             action="switch/turn_on",
             data={"entity_id": "switch.test"},
@@ -118,43 +114,41 @@ class CallHaServiceTests(TestCase):
         self.assertFalse(success)
         self.assertIn("Connection timeout", error)
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_device_id_targeting(self, mock_post):
-        mock_post.return_value = MagicMock(status_code=200)
+        mock_post.return_value = (True, None)
         call_ha_service(
             action="climate/set_temperature",
             data={"entity_id": None, "temperature": 20},
             device_id="test_device",
         )
-        call_args = mock_post.call_args
-        payload = call_args[1]["json"]
-        self.assertEqual(payload["device_id"], "test_device")
-        self.assertNotIn("entity_id", payload)
+        (domain, service, entity_id, extra), _ = mock_post.call_args
+        self.assertEqual((domain, service, entity_id), ("climate", "set_temperature", None))
+        self.assertEqual(extra, {"device_id": "test_device", "temperature": 20})
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_area_id_targeting(self, mock_post):
-        mock_post.return_value = MagicMock(status_code=200)
+        mock_post.return_value = (True, None)
         call_ha_service(
             action="climate/set_temperature",
             data={"temperature": 5},
             area_id=["garage", "garage_storage_room"],
         )
-        call_args = mock_post.call_args
-        payload = call_args[1]["json"]
-        self.assertEqual(payload["area_id"], ["garage", "garage_storage_room"])
+        (_d, _s, entity_id, extra), _ = mock_post.call_args
+        self.assertIsNone(entity_id)
+        self.assertEqual(extra["area_id"], ["garage", "garage_storage_room"])
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_entity_id_override(self, mock_post):
-        mock_post.return_value = MagicMock(status_code=200)
+        mock_post.return_value = (True, None)
         call_ha_service(
             action="switch/turn_on",
             data={"entity_id": None},
             device_id="some_device",
             entity_id_override="switch.specific_entity",
         )
-        call_args = mock_post.call_args
-        payload = call_args[1]["json"]
-        self.assertEqual(payload["entity_id"], "switch.specific_entity")
+        (_d, _s, entity_id, _extra), _ = mock_post.call_args
+        self.assertEqual(entity_id, "switch.specific_entity")
 
 
 class ExecuteStepTests(TestCase):
@@ -318,132 +312,100 @@ class VerifyEntityStateTests(TestCase):
         self.assertIsNone(error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_switch_on_verified(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "on", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "on", "attributes": {}}
         action = {"action": "switch/turn_on", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertTrue(success)
         self.assertIsNone(error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_switch_still_off_after_turn_on(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "off", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "off", "attributes": {}}
         action = {"action": "switch/turn_on", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
         self.assertIn("expected state 'on', got 'off'", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_entity_unavailable(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "unavailable", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "unavailable", "attributes": {}}
         action = {"action": "switch/turn_off", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
         self.assertIn("is unavailable", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_entity_unknown(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "unknown", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "unknown", "attributes": {}}
         action = {"action": "switch/turn_on", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
         self.assertIn("is unknown", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_climate_temperature_verified(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "heat", "attributes": {"temperature": 13.5}},
-        )
+        mock_get.return_value = {"state": "heat", "attributes": {"temperature": 13.5}}
         action = {"action": "climate/set_temperature", "data": {"entity_id": "climate.main_floor", "temperature": 13.5}}
         success, error = verify_entity_state(action)
         self.assertTrue(success)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_climate_temperature_wrong(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "heat", "attributes": {"temperature": 20.0}},
-        )
+        mock_get.return_value = {"state": "heat", "attributes": {"temperature": 20.0}}
         action = {"action": "climate/set_temperature", "data": {"entity_id": "climate.main_floor", "temperature": 13.5}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
         self.assertIn("expected temperature~=13.5, got 20.0", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_climate_preset_mode_verified(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "heat", "attributes": {"preset_mode": "Off"}},
-        )
+        mock_get.return_value = {"state": "heat", "attributes": {"preset_mode": "Off"}}
         action = {"action": "climate/set_preset_mode", "data": {"entity_id": "climate.econet_hpwh", "preset_mode": "Off"}}
         success, error = verify_entity_state(action)
         self.assertTrue(success)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_climate_preset_mode_wrong(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "heat", "attributes": {"preset_mode": "Eco Mode"}},
-        )
+        mock_get.return_value = {"state": "heat", "attributes": {"preset_mode": "Eco Mode"}}
         action = {"action": "climate/set_preset_mode", "data": {"entity_id": "climate.econet_hpwh", "preset_mode": "Off"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
         self.assertIn("expected preset_mode='Off', got 'Eco Mode'", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_number_set_value_verified(self, mock_get):
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "28", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "28", "attributes": {}}
         action = {"action": "number/set_value", "data": {"entity_id": "number.buffer_tank", "value": "28"}}
         success, error = verify_entity_state(action)
         self.assertTrue(success)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_number_set_value_within_tolerance(self, mock_get):
         """Values within C/F rounding tolerance (0.5) should pass verification."""
-        mock_get.return_value = MagicMock(
-            status_code=200,
-            json=lambda: {"state": "37.8", "attributes": {}},
-        )
+        mock_get.return_value = {"state": "37.8", "attributes": {}}
         action = {"action": "number/set_value", "data": {"entity_id": "number.buffer_tank", "value": "38"}}
         success, error = verify_entity_state(action)
         self.assertTrue(success)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_multiple_entities_one_fails(self, mock_get):
         """When multiple entity_ids given, failure of one should fail the verification."""
-        def mock_responses(*args, **kwargs):
-            url = args[0]
-            if "climate.ok" in url:
-                return MagicMock(status_code=200, json=lambda: {"state": "heat", "attributes": {"preset_mode": "none"}})
-            else:
-                return MagicMock(status_code=200, json=lambda: {"state": "unavailable", "attributes": {}})
+        def mock_responses(entity_id):
+            if entity_id == "climate.ok":
+                return {"state": "heat", "attributes": {"preset_mode": "none"}}
+            return {"state": "unavailable", "attributes": {}}
         mock_get.side_effect = mock_responses
         action = {"action": "climate/set_preset_mode", "data": {"entity_id": ["climate.ok", "climate.dead"], "preset_mode": "none"}}
         success, error = verify_entity_state(action)
@@ -451,18 +413,18 @@ class VerifyEntityStateTests(TestCase):
         self.assertIn("climate.dead is unavailable", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
-    def test_http_error_on_state_query(self, mock_get):
-        mock_get.return_value = MagicMock(status_code=500)
+    @patch("vacation_mode.executor.ha.get_entity_state")
+    def test_failed_state_query(self, mock_get):
+        mock_get.return_value = None
         action = {"action": "switch/turn_on", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
-        self.assertIn("HTTP 500", error)
+        self.assertIn("switch.test: failed to query state", error)
 
     @patch("vacation_mode.executor.STATE_VERIFY_DELAY", 0)
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_network_error_on_state_query(self, mock_get):
-        mock_get.side_effect = requests_lib.ConnectionError("timeout")
+        mock_get.side_effect = HAError("timeout")
         action = {"action": "switch/turn_on", "data": {"entity_id": "switch.test"}}
         success, error = verify_entity_state(action)
         self.assertFalse(success)
@@ -551,9 +513,9 @@ class ViewTests(TestCase):
 class DryRunTests(TestCase):
     """Tests for dry run mode."""
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_dry_run_skips_api_call(self, mock_post):
-        """Dry run should not make any HTTP requests."""
+        """Dry run should not call Home Assistant."""
         success, error = call_ha_service(
             action="switch/turn_on",
             data={"entity_id": "switch.test"},
@@ -563,9 +525,9 @@ class DryRunTests(TestCase):
         self.assertIsNone(error)
         mock_post.assert_not_called()
 
-    @patch("vacation_mode.executor.requests.post")
+    @patch("vacation_mode.executor.ha.call_service")
     def test_dry_run_execute_step(self, mock_post):
-        """Dry run step should succeed without HTTP calls."""
+        """Dry run step should succeed without calling Home Assistant."""
         step = {
             "alias": "Test Step",
             "actions": [
@@ -1266,26 +1228,24 @@ class GetCurrentSeasonTests(TestCase):
     """Tests for executor.get_current_season season selection."""
 
     def _mock_response(self, status_code=200, state="20.0"):
-        resp = MagicMock()
-        resp.status_code = status_code
-        resp.json.return_value = {"state": state}
-        return resp
+        # ha.get_entity_state returns None when HA answers with an error.
+        return {"state": state} if status_code == 200 else None
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_warm_avg_selects_cooling(self, mock_get):
         mock_get.return_value = self._mock_response(state="20.0")
         season, avg = get_current_season()
         self.assertEqual(season, SEASON_COOLING)
         self.assertEqual(avg, 20.0)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_cold_avg_selects_heating(self, mock_get):
         mock_get.return_value = self._mock_response(state="5.0")
         season, avg = get_current_season()
         self.assertEqual(season, SEASON_HEATING)
         self.assertEqual(avg, 5.0)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_threshold_boundary_selects_cooling(self, mock_get):
         """At exactly the threshold we cool (>= threshold)."""
         mock_get.return_value = self._mock_response(state=str(SEASON_THRESHOLD_C))
@@ -1293,29 +1253,29 @@ class GetCurrentSeasonTests(TestCase):
         self.assertEqual(season, SEASON_COOLING)
         self.assertEqual(avg, SEASON_THRESHOLD_C)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_just_below_threshold_selects_heating(self, mock_get):
         mock_get.return_value = self._mock_response(state=str(SEASON_THRESHOLD_C - 0.1))
         season, _ = get_current_season()
         self.assertEqual(season, SEASON_HEATING)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_http_error_defaults_to_heating(self, mock_get):
         mock_get.return_value = self._mock_response(status_code=500)
         season, avg = get_current_season()
         self.assertEqual(season, SEASON_HEATING)
         self.assertIsNone(avg)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_unparseable_state_defaults_to_heating(self, mock_get):
         mock_get.return_value = self._mock_response(state="unavailable")
         season, avg = get_current_season()
         self.assertEqual(season, SEASON_HEATING)
         self.assertIsNone(avg)
 
-    @patch("vacation_mode.executor.requests.get")
+    @patch("vacation_mode.executor.ha.get_entity_state")
     def test_request_exception_defaults_to_heating(self, mock_get):
-        mock_get.side_effect = requests_lib.RequestException("boom")
+        mock_get.side_effect = HAError("boom")
         season, avg = get_current_season()
         self.assertEqual(season, SEASON_HEATING)
         self.assertIsNone(avg)
@@ -1793,3 +1753,80 @@ class VacationConfigTests(TestCase):
                                      "BDL_MODES_PREHEAT": "false"}):
             self.assertEqual(config.modes_url(), BM_URL)
             self.assertFalse(config.preheat_enabled())
+
+
+class ManifestTests(TestCase):
+    """The hub API 2 container manifest."""
+
+    def setUp(self):
+        from .plugin import spec
+        self.spec = spec
+
+    def test_container_shape(self):
+        self.assertEqual(self.spec.api_version, 2)
+        self.assertEqual((self.spec.network, self.spec.lifecycle, self.spec.memory_mb), ("lan", "always", 96))
+
+    def test_settings(self):
+        from bdh_sdk.plugins import SECRET
+        types = {s.key: s.type for s in self.spec.settings}
+        self.assertEqual(set(types), {"modes_url", "modes_api_key", "preheat"})
+        self.assertEqual(types["modes_api_key"], SECRET)
+
+    def test_permissions_cover_every_step(self):
+        """Every service the built-in steps call, and every entity they verify, is granted."""
+        from fnmatch import fnmatchcase
+        from .executor import SEASON_OUTDOOR_AVG_ENTITY
+        perms = self.spec.permissions
+        reads = [p[len("ha.read:"):] for p in perms if p.startswith("ha.read:")]
+        calls = {p[len("ha.call:"):] for p in perms if p.startswith("ha.call:")}
+        used_calls = set()
+        for season in (SEASON_HEATING, SEASON_COOLING):
+            for step in build_vacation_steps(season) + build_home_steps(season):
+                for action in step.get("actions", []):
+                    used_calls.add(action["action"].replace("/", "."))
+                    for eid in _get_entity_ids_for_action(action):
+                        self.assertTrue(any(fnmatchcase(eid, g) for g in reads), eid)
+        self.assertEqual(used_calls, calls)
+        for eid in ("input_boolean.home_away_mode_enabled", SEASON_OUTDOOR_AVG_ENTITY):
+            self.assertTrue(any(fnmatchcase(eid, g) for g in reads), eid)
+
+
+class BrokerTests(TestCase):
+    """In the container, HA and the API key go through the hub broker."""
+
+    def setUp(self):
+        from bdh_sdk import rpc
+        from bdh_sdk.testing import FakeBroker
+        self.broker = FakeBroker(grants=("ha.*", "settings.get", "secrets.get"), install=True,
+                                 app_id="vacation_mode")
+        self.broker.start()
+        self.addCleanup(self.broker.stop)
+        self.addCleanup(rpc.flush, 5)
+
+    def test_service_call_via_broker(self):
+        self.broker.on("ha.call_service", lambda p: [True, None])
+        ok, err = call_ha_service("climate/set_temperature",
+                                  {"entity_id": "climate.main_floor", "temperature": 13.5})
+        self.assertEqual((ok, err), (True, None))
+        (call,) = self.broker.ops("ha.call_service")
+        self.assertEqual((call["domain"], call["service"], call["entity_id"], call["extra_data"]),
+                         ("climate", "set_temperature", "climate.main_floor", {"temperature": 13.5}))
+
+    def test_service_call_refused(self):
+        def refuse(p):
+            raise self.broker.Error("forbidden", "may not call lock.unlock", status=403)
+        self.broker.on("ha.call_service", refuse)
+        ok, err = call_ha_service("lock/unlock", {"entity_id": "lock.front"})
+        self.assertFalse(ok)
+        self.assertTrue(err)
+
+    def test_away_state_via_broker(self):
+        self.broker.on("ha.get_entity_state", lambda p: {"entity_id": p["entity_id"], "state": "on"})
+        self.assertTrue(get_away_mode_state())
+        (call,) = self.broker.ops("ha.get_entity_state")
+        self.assertEqual(call["entity_id"], "input_boolean.home_away_mode_enabled")
+
+    def test_api_key_from_secret_store(self):
+        from . import config
+        self.broker.secrets[("vacation_mode", "modes_api_key")] = "from-vault"
+        self.assertEqual(config.modes_api_key(), "from-vault")

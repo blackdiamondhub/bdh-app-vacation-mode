@@ -2,6 +2,7 @@
 
 Legacy un-namespaced names (``BDL_MODES_*``) are still honoured.
 """
+from bdh_sdk import secrets
 from bdh_sdk.settings import app_setting, as_bool
 
 APP_ID = "vacation_mode"
@@ -13,8 +14,9 @@ def modes_url():
 
 
 def modes_api_key():
-    return app_setting(APP_ID, "modes_api_key", "",
-                       legacy=("BDL_MODES_API_KEY",))
+    """The bdl_modes API key: the app's secret, else the old plain setting."""
+    return (secrets.get("modes_api_key", app=APP_ID, legacy=("BDL_MODES_API_KEY",))
+            or app_setting(APP_ID, "modes_api_key", "", legacy=("BDL_MODES_API_KEY",)))
 
 
 def preheat_enabled():

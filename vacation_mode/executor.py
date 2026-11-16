@@ -1,18 +1,17 @@
 """
 Execution engine for vacation/home mode steps.
 
-Runs steps sequentially in a background thread, calling the Home Assistant
-REST API for each action. Supports retries and stores per-step status
+Runs steps sequentially in a background thread, calling Home Assistant
+(through ``bdh_sdk.ha``) for each action. Supports retries and stores per-step status
 in an in-memory store keyed by run_id.
 """
 
 import threading
 import time
 import uuid
-import requests
 import logging
-from urllib.parse import urljoin
-from django.conf import settings
+
+from bdh_sdk import ha
 
 logger = logging.getLogger(__name__)
 
@@ -42,33 +41,20 @@ SEASON_OUTDOOR_AVG_ENTITY = "sensor.hvac_load_shift_metrics_outdoor_avg_day"
 SEASON_THRESHOLD_C = 15.0
 
 
-def get_ha_headers():
-    """Get authorization headers for Home Assistant API."""
-    return {
-        "Authorization": f"Bearer {settings.HOMEASSISTANT_ACCESS_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-
-def get_ha_base_url():
-    """Get the Home Assistant base URL."""
-    return settings.HOMEASSISTANT_URL
-
-
 def get_away_mode_state():
     """
     Query Home Assistant for the current state of input_boolean.home_away_mode_enabled.
     Returns True if away mode is on, False otherwise.
     """
-    url = urljoin(get_ha_base_url(), "/api/states/input_boolean.home_away_mode_enabled")
     try:
-        response = requests.get(url, headers=get_ha_headers(), timeout=10)
-        if response.status_code == 200:
-            state = response.json().get("state", "off")
-            return state == "on"
-    except requests.RequestException as e:
+        state = ha.get_entity_state("input_boolean.home_away_mode_enabled")
+    except Exception as e:
         logger.error(f"Failed to query away mode state: {e}")
-    return False
+        return False
+    if state is None:
+        logger.error("Failed to query away mode state")
+        return False
+    return state.get("state", "off") == "on"
 
 
 def get_current_season():
@@ -82,21 +68,19 @@ def get_current_season():
     """
     from .steps import SEASON_HEATING, SEASON_COOLING
 
-    url = urljoin(get_ha_base_url(), f"/api/states/{SEASON_OUTDOOR_AVG_ENTITY}")
     try:
-        response = requests.get(url, headers=get_ha_headers(), timeout=10)
-        if response.status_code == 200:
-            avg = float(response.json().get("state"))
-            season = SEASON_COOLING if avg >= SEASON_THRESHOLD_C else SEASON_HEATING
-            logger.info(
-                f"Season decision: outdoor daily avg {avg}°C "
-                f"(threshold {SEASON_THRESHOLD_C}°C) → {season}"
-            )
-            return season, avg
-        logger.warning(
-            f"Season sensor returned HTTP {response.status_code}; defaulting to heating"
+        state = ha.get_entity_state(SEASON_OUTDOOR_AVG_ENTITY)
+        if state is None:
+            logger.warning("Season sensor could not be read; defaulting to heating")
+            return SEASON_HEATING, None
+        avg = float(state.get("state"))
+        season = SEASON_COOLING if avg >= SEASON_THRESHOLD_C else SEASON_HEATING
+        logger.info(
+            f"Season decision: outdoor daily avg {avg}°C "
+            f"(threshold {SEASON_THRESHOLD_C}°C) → {season}"
         )
-    except (requests.RequestException, ValueError, TypeError) as e:
+        return season, avg
+    except Exception as e:
         logger.warning(f"Failed to read season sensor ({e}); defaulting to heating")
     return SEASON_HEATING, None
 
@@ -128,7 +112,6 @@ def call_ha_service(action, data, device_id=None, area_id=None, entity_id_overri
         (success: bool, error_message: str or None)
     """
     domain, service = action.split("/")
-    url = urljoin(get_ha_base_url(), f"/api/services/{domain}/{service}")
 
     payload = dict(data)
 
@@ -160,23 +143,21 @@ def call_ha_service(action, data, device_id=None, area_id=None, entity_id_overri
     payload = {k: v for k, v in payload.items() if v is not None}
 
     if dry_run:
-        logger.info(f"[DRY RUN] Would call HA service: {url} with payload: {payload}")
+        logger.info(f"[DRY RUN] Would call HA service: {domain}.{service} with payload: {payload}")
         time.sleep(0.5)  # Simulate a short delay
         return True, None
 
+    entity_id = payload.pop("entity_id", None)
     try:
-        logger.info(f"Calling HA service: {url} with payload: {payload}")
-        response = requests.post(url, headers=get_ha_headers(), json=payload, timeout=30)
-        if response.status_code in (200, 201):
-            return True, None
-        else:
-            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-            logger.error(f"HA service call failed: {error_msg}")
-            return False, error_msg
-    except requests.RequestException as e:
-        error_msg = str(e)
-        logger.error(f"HA service call exception: {error_msg}")
-        return False, error_msg
+        logger.info(f"Calling HA service: {domain}.{service} on {entity_id} with data: {payload}")
+        ok, error_msg = ha.call_service(domain, service, entity_id, payload or None)
+    except Exception as e:
+        ok, error_msg = False, str(e)
+    if ok:
+        return True, None
+    error_msg = error_msg or "service call failed"
+    logger.error(f"HA service call failed: {error_msg}")
+    return False, error_msg
 
 
 def _get_expected_state(action, data):
@@ -301,14 +282,12 @@ def _check_entities(entity_ids, check_type, expected):
     """
     errors = []
     for entity_id in entity_ids:
-        url = urljoin(get_ha_base_url(), f"/api/states/{entity_id}")
         try:
-            response = requests.get(url, headers=get_ha_headers(), timeout=10)
-            if response.status_code != 200:
-                errors.append(f"{entity_id}: failed to query state (HTTP {response.status_code})")
+            state_data = ha.get_entity_state(entity_id)
+            if state_data is None:
+                errors.append(f"{entity_id}: failed to query state")
                 continue
 
-            state_data = response.json()
             actual_state = state_data.get("state")
 
             # Any entity in unavailable/unknown state is a failure
@@ -354,7 +333,7 @@ def _check_entities(entity_ids, check_type, expected):
                         f"{entity_id}: expected {attr_name}='{expected}', got '{actual_value}'"
                     )
 
-        except requests.RequestException as e:
+        except Exception as e:
             errors.append(f"{entity_id}: state query failed: {e}")
 
     return errors
