@@ -1578,14 +1578,13 @@ class BdlModesViewTests(TestCase):
         self.user.save()
         self.client.force_login(self.user)
 
-    def test_requires_login(self):
+    def test_anonymous_is_forbidden(self):
         r = self.client.get("/vacation_mode/")
-        self.assertEqual(r.status_code, 302)
-        self.assertIn("login", r["Location"])
+        self.assertEqual(r.status_code, 403)
         r = self.client.post("/vacation_mode/api/modes/command/",
                              data=json.dumps({"cmd": "home"}),
                              content_type="application/json")
-        self.assertEqual(r.status_code, 302)
+        self.assertEqual(r.status_code, 403)
 
     @patch("vacation_mode.views.bdl_client.call")
     def test_page_renders_status_and_previews(self, call):
@@ -1700,10 +1699,9 @@ class BdlModesDisabledTests(TestCase):
 class LegacyViewsRequireLoginTests(TestCase):
     """Legacy vacation-mode page and API must not be reachable anonymously."""
 
-    def test_page_redirects_to_login(self):
+    def test_page_forbidden(self):
         r = self.client.get("/vacation_mode/")
-        self.assertEqual(r.status_code, 302)
-        self.assertIn("login", r["Location"])
+        self.assertEqual(r.status_code, 403)
 
     @patch("vacation_mode.views.start_execution")
     def test_execute_rejected(self, mock_start):
@@ -1712,23 +1710,20 @@ class LegacyViewsRequireLoginTests(TestCase):
             data=json.dumps({"mode": "vacation"}),
             content_type="application/json",
         )
-        self.assertNotEqual(r.status_code, 200)
-        self.assertIn("login", r["Location"])
+        self.assertEqual(r.status_code, 403)
         mock_start.assert_not_called()
 
     @patch("vacation_mode.views.get_active_run")
     @patch("vacation_mode.views.get_away_mode_state")
     def test_state_rejected(self, mock_away, mock_active):
         r = self.client.get("/vacation_mode/api/state/")
-        self.assertNotEqual(r.status_code, 200)
-        self.assertIn("login", r["Location"])
+        self.assertEqual(r.status_code, 403)
         mock_away.assert_not_called()
 
     @patch("vacation_mode.views.get_run_status")
     def test_status_rejected(self, mock_status):
         r = self.client.get("/vacation_mode/api/status/abc123/")
-        self.assertNotEqual(r.status_code, 200)
-        self.assertIn("login", r["Location"])
+        self.assertEqual(r.status_code, 403)
         mock_status.assert_not_called()
 
 
