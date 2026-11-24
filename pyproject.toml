@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.urls]
-Source = "https://github.com/blackdiamondlodge/bdh-app-vacation-mode"
+Source = "https://github.com/blackdiamondhub/bdh-app-vacation-mode"
 
 [project.entry-points."blackdiamondhub.plugins"]
 vacation_mode = "vacation_mode.plugin:spec"
