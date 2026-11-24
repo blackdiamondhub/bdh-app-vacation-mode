@@ -1028,13 +1028,6 @@ class HomepageIconTests(TestCase):
 
     def setUp(self):
         self.client = Client()
-        patcher = patch("BlackDiamondHub.views.requests.get")
-        mock_get = patcher.start()
-        self.addCleanup(patcher.stop)
-        mock_response = MagicMock(status_code=200)
-        mock_response.content = b'<div class="weather current-conditions"><ul class="list-temps"></ul></div>'
-        mock_response.raise_for_status = MagicMock()
-        mock_get.return_value = mock_response
 
     def test_homepage_shows_vacation_icon_when_logged_in(self):
         from django.contrib.auth.models import User
